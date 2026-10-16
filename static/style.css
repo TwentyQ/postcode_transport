@@ -1,0 +1,78 @@
+body {
+    font-family: sans-serif;
+    max-width: 600px;
+    margin: 40px auto;
+    padding: 0 20px;
+}
+
+input, button {
+    font-size: 16px;
+    padding: 8px;
+    margin: 6px 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+button {
+    background: #0066cc;
+    color: white;
+    border: none;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #0055aa;
+}
+
+#result {
+    margin-top: 20px;
+    padding: 16px;
+    background: #f4f4f4;
+    border-radius: 8px;
+    display: none;
+}
+
+.err {
+    color: #b00;
+}
+
+.bar-container {
+    background: #eee;
+    height: 30px;
+    border-radius: 15px;
+    margin-top: 12px;
+    overflow: hidden;
+}
+
+.bar-fill {
+    height: 100%;
+    color: white;
+    text-align: center;
+    line-height: 30px;
+    font-weight: bold;
+    transition: width 0.4s ease, background-color 0.4s ease;
+}
+
+.bar-fill.underload {
+    background: #d33;
+}
+
+.bar-fill.normal {
+    background: #e8a600;
+}
+
+.bar-fill.full {
+    background: #2a8;
+}
+
+.warning {
+    color: #d33;
+    margin-top: 10px;
+    font-weight: bold;
+}
+
+.confidence {
+    margin-top: 8px;
+    font-size: 14px;
+    color: #666;
+}

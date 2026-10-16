@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>Оценка загрузки кузова</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>Оценка загрузки грузового отсека</h1>
+    <form id="form">
+        <label>Номер перевозки:</label>
+        <input type="text" id="transport_id" value="T-DEMO-001" required>
+
+        <label>Фотография кузова:</label>
+        <input type="file" id="image" accept="image/*" required>
+
+        <button type="submit">Оценить загрузку</button>
+    </form>
+
+    <div id="result"></div>
+
+    <hr style="margin:40px 0;border:none;border-top:1px solid #ddd;">
+
+    <h2>Дообучение модели</h2>
+    <form id="retrain-form">
+        <label>CSV с новыми фото (image_id, load_pct):</label>
+        <input type="file" id="csv-file" accept=".csv" required>
+
+        <label>Папка с фотографиями:</label>
+        <input type="file" id="retrain-images" accept="image/*" multiple required>
+
+        <button type="submit">Дообучить модель</button>
+    </form>
+
+    <div id="retrain-status" style="margin-top:16px;padding:12px;background:#f4f4f4;border-radius:8px;display:none;">
+        <b>Статус:</b> <span id="retrain-state">—</span>
+        <div id="retrain-bar-container" style="background:#ddd;height:8px;border-radius:4px;margin-top:8px;overflow:hidden;">
+            <div id="retrain-bar" style="background:#0066cc;height:100%;width:0%;transition:width 0.4s ease;"></div>
+        </div>
+        <pre id="retrain-log" style="margin-top:10px;font-size:12px;max-height:200px;overflow:auto;background:#fff;padding:8px;border-radius:4px;"></pre>
+    </div>
+
+    <script>
+    // ====== 1. Оценка загрузки (старая логика) ======
+    document.getElementById('form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const tid = document.getElementById('transport_id').value;
+        const file = document.getElementById('image').files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async () => {
+            const b64 = reader.result.split(',')[1];
+            const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<request>
+  <transport_id>${tid}</transport_id>
+  <image_base64>${b64}</image_base64>
+</request>`;
+
+            const r = await fetch('/api/predict', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/xml'},
+                body: xml
+            });
+            const text = await r.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'application/xml');
+            const status = doc.querySelector('status')?.textContent;
+            const pct = doc.querySelector('load_pct')?.textContent;
+            const conf = doc.querySelector('confidence')?.textContent;
+            const underloaded = doc.querySelector('is_underloaded')?.textContent;
+            const msg = doc.querySelector('message')?.textContent;
+
+            const box = document.getElementById('result');
+            box.style.display = 'block';
+            if (status === 'success') {
+                const pctNum = parseFloat(pct);
+                let barColor = '#2a8';
+                if (pctNum < 30) barColor = '#d33';
+                else if (pctNum < 70) barColor = '#e8a600';
+
+                const confPct = conf ? Math.round(parseFloat(conf) * 100) : null;
+
+                let warning = '';
+                if (underloaded === 'true') {
+                    warning = '<div style="color:#d33;margin-top:8px;font-weight:bold;">⚠ Машина недогружена</div>';
+                }
+
+                let confLine = '';
+                if (confPct !== null) {
+                    confLine = `<div style="margin-top:8px;font-size:14px;color:#666;">Уверенность модели: ${confPct}%</div>`;
+                }
+
+                box.innerHTML = `
+                    <b>Загрузка: ${pct}%</b><br>Перевозка: ${tid}
+                    <div style="background:#eee;height:30px;border-radius:15px;margin-top:12px;overflow:hidden;">
+                        <div style="background:${barColor};width:${pctNum}%;height:100%;color:white;
+                                    text-align:center;line-height:30px;font-weight:bold;
+                                    transition:width 0.3s ease;">
+                            ${pctNum.toFixed(1)}%
+                        </div>
+                    </div>
+                    ${warning}
+                    ${confLine}
+                `;
+            } else {
+                box.innerHTML = `<span class="err">Ошибка: ${msg || 'неизвестная'}</span>`;
+            }
+        };
+        reader.readAsDataURL(file);
+    });
+
+    // ====== 2. Дообучение модели (новая логика) ======
+    const readFileAsBase64 = (file) => new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.readAsDataURL(file);
+    });
+
+    const readFileAsText = (file) => new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsText(file);
+    });
+
+    document.getElementById('retrain-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const csvFile = document.getElementById('csv-file').files[0];
+        const imageFiles = document.getElementById('retrain-images').files;
+
+        if (!csvFile || imageFiles.length === 0) return;
+
+        const statusBox = document.getElementById('retrain-status');
+        const stateEl = document.getElementById('retrain-state');
+        const logEl = document.getElementById('retrain-log');
+        const barEl = document.getElementById('retrain-bar');
+
+        statusBox.style.display = 'block';
+        stateEl.textContent = 'Подготовка данных...';
+        logEl.textContent = '';
+        barEl.style.width = '5%';
+
+        // CSV в base64
+        const csvB64 = await readFileAsBase64(csvFile);
+
+        // Собираем XML
+        let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<request>\n';
+        xml += `  <csv_base64>${csvB64}</csv_base64>\n`;
+
+        for (const file of imageFiles) {
+            const b64 = await readFileAsBase64(file);
+            const imageId = file.name.replace(/\.(jpg|jpeg|png)$/i, '');
+            xml += `  <image_base64 image_id="${imageId}">${b64}</image_base64>\n`;
+        }
+        xml += '</request>';
+
+        stateEl.textContent = 'Отправка на сервер...';
+        barEl.style.width = '15%';
+
+        let jobId = null;
+        try {
+            const r = await fetch('/api/retrain', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/xml'},
+                body: xml
+            });
+            const text = await r.text();
+            const doc = new DOMParser().parseFromString(text, 'application/xml');
+            const status = doc.querySelector('status')?.textContent;
+            const err = doc.querySelector('message')?.textContent;
+
+            if (status !== 'started') {
+                stateEl.textContent = 'Ошибка: ' + (err || 'неизвестная');
+                barEl.style.background = '#d33';
+                return;
+            }
+
+            jobId = doc.querySelector('job_id')?.textContent;
+            stateEl.textContent = 'Обучение идёт... (job ' + jobId + ')';
+            barEl.style.width = '25%';
+        } catch (err) {
+            stateEl.textContent = 'Ошибка сети: ' + err.message;
+            barEl.style.background = '#d33';
+            return;
+        }
+
+        // Опрос статуса каждые 3 секунды
+        let progress = 25;
+        const poll = setInterval(async () => {
+            try {
+                const r = await fetch('/api/retrain_status/' + jobId);
+                const text = await r.text();
+                const doc = new DOMParser().parseFromString(text, 'application/xml');
+                const status = doc.querySelector('status')?.textContent;
+                const log = doc.querySelector('log')?.textContent || '';
+                const modelPath = doc.querySelector('model_path')?.textContent;
+
+                logEl.textContent = log;
+                logEl.scrollTop = logEl.scrollHeight;
+
+                if (status === 'done') {
+                    clearInterval(poll);
+                    stateEl.textContent = '✅ Готово! Новая модель: ' + modelPath;
+                    barEl.style.width = '100%';
+                    barEl.style.background = '#2a8';
+                } else {
+                    progress = Math.min(progress + 3, 90);
+                    barEl.style.width = progress + '%';
+                }
+            } catch (err) {
+                // тихо игнорируем сетевые ошибки на опросе
+            }
+        }, 3000);
+    });
+    </script>
+</body>
+</html>
